@@ -1,0 +1,19 @@
+services:
+  enocean-bridge:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: enocean-bridge
+    restart: unless-stopped
+
+    devices:
+      - /dev/ttyAMA0:/dev/ttyAMA0
+
+    volumes:
+      - ./config:/app/config
+      - ./state:/app/state
+
+    env_file:
+      - .env
+    environment:
+      TZ: Europe/Berlin

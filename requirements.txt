@@ -1,0 +1,4 @@
+paho-mqtt>=2.0
+enocean>=0.60.0
+pyyaml>=6.0
+cryptography>=42.0

@@ -1,0 +1,106 @@
+mqtt:
+  host: ${MQTT_HOST}
+  port: ${MQTT_PORT}
+  username: ${MQTT_USERNAME}
+  password: ${MQTT_PASSWORD}
+  client_id: enocean_bridge
+
+enocean:
+  port: /dev/ttyAMA0
+  base_id: FF956700       # read from TCM310 via CO_RD_IDBASE
+
+devices:
+
+  # -----------------------------------------------
+  # Covers (D2-05-00)
+  # -----------------------------------------------
+
+  - name: Living_Room_Blind
+    enocean_id: 05AAAAAA   # actuator hardware ID (on label)
+    sender_id: FF956701    # gateway sub-ID (base_id + offset, unique per device)
+    type: cover
+    eep: D2-05-00
+
+  # -----------------------------------------------
+  # Lights (D2-01-0F NodOn)
+  # -----------------------------------------------
+
+  - name: Living_Room_Light
+    enocean_id: 05BBBBBB
+    sender_id: FF956702
+    type: light
+    eep: D2-01-0F
+
+  # -----------------------------------------------
+  # Secure Switch (D2-03-00 Eltako VAES)
+  # -----------------------------------------------
+
+  - name: Bedroom_Switch
+    enocean_id: 05CCCCCC
+    sender_id: FF956703
+    type: switch
+    eep: D2-03-00
+    secure:
+      enabled: true
+      key: 00000000000000000000000000000000   # 16-byte AES key from pairing
+      mac_algo: 3
+      rlc_algo: 2pp
+
+  # -----------------------------------------------
+  # F6 RPS Dimmer (Synergie21 EOS 09)
+  # -----------------------------------------------
+
+  - name: Kitchen_Dimmer
+    enocean_id: FF956704   # gateway sub-ID (used as actuator ID for F6)
+    sender_id: FF956704
+    type: light
+    eep: F6-02-01
+    dimmer: true
+    dim_on_button: 0x10    # button that switches ON  (verify with your device)
+    dim_off_button: 0x30   # button that switches OFF
+    dim_up_button: 0x30    # button held = dim up
+    dim_down_button: 0x10  # button held = dim down
+    dim_start_delay: 1.0   # seconds before dimming starts after press
+    dim_full_time: 5.0     # seconds for full range (0% → 100%)
+
+  # -----------------------------------------------
+  # Switch passthrough — single channel
+  # -----------------------------------------------
+
+  - name: Kitchen_Switch
+    enocean_id: 003B0000   # switch hardware ID (on label)
+    type: switch_passthrough
+    eep: F6-02-01
+    linked_dimmer: Kitchen_Dimmer
+    sw_up_button: 0x70     # rocker A top (AI)
+    sw_down_button: 0x50   # rocker A bottom (AO)
+
+  # -----------------------------------------------
+  # Switch passthrough — 2-channel
+  # -----------------------------------------------
+
+  - name: Living_Room_Switch
+    enocean_id: 003B1111
+    type: switch_passthrough
+    eep: F6-02-01
+    linked_dimmers:
+      - dimmer: Living_Room_Dimmer_A
+        sw_up_button: 0x70
+        sw_down_button: 0x50
+      - dimmer: Living_Room_Dimmer_B
+        sw_up_button: 0x30
+        sw_down_button: 0x10
+
+  # -----------------------------------------------
+  # Window sensor (A5-14-0A VAES encrypted)
+  # -----------------------------------------------
+
+  - name: Kitchen_Window
+    enocean_id: 05DDDDDD
+    type: sensor
+    eep: A5-14-0A
+    secure:
+      enabled: true
+      key: 00000000000000000000000000000000
+      rlc_in_frame: true
+      mac_algo: 3
