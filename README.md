@@ -2,6 +2,8 @@
 
 A Python-based bridge that connects EnOcean devices to Home Assistant via MQTT. Runs on a Raspberry Pi Zero 2W with a TCM310 USB stick (`/dev/ttyAMA0`).
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-%23FFDD00?style=flat&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/andreasbloch)
+
 ## Features
 
 | Device Type | EEP | Notes |
