@@ -80,7 +80,9 @@ class EnOceanSecureCrypto:
         Returns: data_end_byte + mac_3bytes  (no RLC, no RORG)
         """
         key = self.ctx.key
-        rlc = self.ctx.rlc_counter
+        # Defensive 2-Byte-Maske: schützt vor übergelaufenen Werten,
+        # falls der RLC an anderer Stelle ohne Wraparound gesetzt wurde
+        rlc = self.ctx.rlc_counter & 0xFFFF
         rlc_bytes = rlc.to_bytes(2, 'big')
 
         # Step 1: expand CMD to 16 bytes
