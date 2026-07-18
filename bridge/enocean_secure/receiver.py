@@ -4,6 +4,12 @@ from cryptography.hazmat.backends import default_backend
 
 _PUBLIC_KEY = bytes.fromhex("3410de8f1aba3eff9f5a117172eacabd")
 
+# 2-Byte Rolling Code (rlc_algo "2pp" / A5-14-0A)
+_RLC_MASK = 0xFFFF
+
+# Forward acceptance window for replay protection (per FHEM spec: 128)
+REPLAY_WINDOW = 128
+
 
 def _aes_ecb(key: bytes, data: bytes) -> bytes:
     c = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
@@ -40,12 +46,21 @@ def decode_secure_4bs(
     rlc_counter: int,
     rlc_in_frame: bool = True,
     mac_len: int = 3,
+    replay_window: int | None = REPLAY_WINDOW,
 ) -> tuple[bytes | None, int | None, str | None]:
     """
     Decode an incoming RORG=0x31 (Secure with encapsulation) telegram.
 
     Wire layout (rlcTX=true, macAlgo=3):
         [encrypted_data] [RLC 2 bytes] [MAC 3 bytes]
+
+    Replay protection (rlc_in_frame=True):
+        The RLC transmitted in the frame is only accepted if it lies in the
+        wrap-aware FORWARD window relative to the stored counter:
+            delta = (frame_rlc - rlc_counter) & 0xFFFF
+            accept if delta < replay_window
+        Pass replay_window=None to disable the check (initial sync after
+        restart — the caller adopts the frame RLC as new baseline).
 
     Returns:
         (inner_data_bytes, new_rlc, error_str)
@@ -64,16 +79,27 @@ def decode_secure_4bs(
         rlc_hex      = payload_hex[len(data_enc_hex) : len(data_enc_hex) + rlc_chars]
         mac_rx_hex   = payload_hex[len(data_enc_hex) + rlc_chars:]
         rlc_val = int(rlc_hex, 16)
+
+        # --- Replay protection: wrap-aware forward window ---
+        if replay_window is not None:
+            stored = rlc_counter & _RLC_MASK
+            delta = (rlc_val - stored) & _RLC_MASK
+            if delta >= replay_window:
+                return None, None, (
+                    f"Replay/out-of-window: frame RLC=0x{rlc_val:04X}, "
+                    f"stored=0x{stored:04X}, delta={delta}, "
+                    f"window={replay_window}"
+                )
     else:
         mac_chars = mac_len * 2
         data_enc_hex = payload_hex[:total - mac_chars]
         mac_rx_hex   = payload_hex[total - mac_chars:]
-        rlc_val = rlc_counter
+        rlc_val = rlc_counter & _RLC_MASK
 
     # Search window of 128 (per FHEM spec)
-    search_start = rlc_val if rlc_in_frame else rlc_counter
+    search_start = rlc_val if rlc_in_frame else (rlc_counter & _RLC_MASK)
     for offset in range(128 if not rlc_in_frame else 1):
-        rlc_try = (search_start + offset) & 0xFFFF
+        rlc_try = (search_start + offset) & _RLC_MASK
         rlc_try_hex = f"{rlc_try:04X}"
 
         # Verify MAC
