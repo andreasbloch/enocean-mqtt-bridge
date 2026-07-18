@@ -23,6 +23,7 @@ class EnOceanReceiver(threading.Thread):
         self.state_store  = StateStore()
         self.secure_store = secure_store
         self._press_times = {}   # enocean_id → press start time
+        self._secure_rx_synced = set()   # enocean_ids mit synchronisiertem RX-RLC (Replay-Schutz aktiv)
 
     # --------------------------------------------------
     # Thread loop
@@ -282,19 +283,39 @@ class EnOceanReceiver(threading.Thread):
         if not sec.get("enabled") or not sec.get("key"):
             return
 
+        enocean_id = device["enocean_id"].upper()
+        ctx = self.secure_store.get(enocean_id) if self.secure_store else None
+
+        # RLC-Quelle: persistierter SecureContext vor config-Dict (Fossil)
+        stored_rlc = ctx.rlc_counter if ctx else sec.get("rlc_counter", 0)
+
+        # Replay-Schutz erst nach initialem Sync aktivieren:
+        # Das erste gueltige Telegramm nach Neustart uebernimmt den Frame-RLC
+        # als neue Baseline (Sensor kann waehrend Downtime beliebig weit
+        # vorgelaufen sein). Danach gilt das 128er-Vorwaertsfenster.
+        synced = enocean_id in self._secure_rx_synced
+
         payload = bytes(pkt.data[1:-5])
         inner_data, new_rlc, err = decode_secure_4bs(
             rorg_s       = 0x31,
             payload      = payload,
             key          = bytes.fromhex(sec["key"]),
-            rlc_counter  = sec.get("rlc_counter", 0),
+            rlc_counter  = stored_rlc,
             rlc_in_frame = sec.get("rlc_in_frame", True),
+            replay_window = 128 if synced else None,
         )
         if err:
             logging.warning("[SECURE-RX] %s: %s", device["name"], err)
             return
 
-        sec["rlc_counter"] = new_rlc + 1
+        self._secure_rx_synced.add(enocean_id)
+
+        # RLC wrap-sicher fortschreiben und in den SecureStore persistieren
+        next_rlc = (new_rlc + 1) & 0xFFFF
+        sec["rlc_counter"] = next_rlc   # config-Dict konsistent halten
+        if ctx:
+            ctx.rlc_counter = next_rlc  # Property-Setter maskiert zusaetzlich
+            ctx.mark_dirty()
         if self.secure_store:
             self.secure_store.save()
 
