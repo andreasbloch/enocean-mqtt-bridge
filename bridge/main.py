@@ -1,4 +1,7 @@
+import json
 import logging
+import threading
+import time
 
 from enocean.communicators.serialcommunicator import SerialCommunicator
 
@@ -7,6 +10,7 @@ from bridge.mqtt_client import MqttClient
 from bridge.enocean_sender import EnOceanSender
 from bridge.enocean_receiver import EnOceanReceiver
 from bridge.enocean_secure.store import SecureStore
+from bridge.state_store import StateStore
 from bridge.enocean_secure.context import SecureContext
 
 from bridge.discovery_light import publish_light_discovery
@@ -32,14 +36,14 @@ def main():
     # -------------------------------------------------
     secure_store = SecureStore()
 
-    # ✅ WICHTIG: Secure-Contexts aus Config registrieren
+    # Secure-Contexts aus Config registrieren
     for device_list in cfg["devices_by_id"].values():
         for device in device_list:
             sec = device.get("secure")
             if not sec or not sec.get("enabled"):
                 continue
 
-            enocean_id = device["enocean_id"].upper()  # ✅ Normalisieren!
+            enocean_id = device["enocean_id"].upper()
 
             # Use persisted RLC from secure_state.json if available.
             # config.yaml rlc_counter is intentionally ignored — it is always
@@ -127,10 +131,60 @@ def main():
                 receiver.make_command_handler(device),
             )
 
+    # -------------------------------------------------
+    # Re-publish: seed from state.json + cover position query
+    # -------------------------------------------------
+    state_store_ref = StateStore()
+
+    def _query_covers():
+        """
+        D2-05-00 CMD 3 (query position). The actuator answers with its
+        current position, which the receiver publishes like after a move.
+        Spaced out to avoid RF collisions.
+        """
+        for device_list in cfg["devices_by_id"].values():
+            for device in device_list:
+                if device["type"] != "cover":
+                    continue
+                try:
+                    sid = bytes.fromhex(device["sender_id"])
+                    eid = bytes.fromhex(device["enocean_id"])
+                    logging.info("[COVER] Position query -> %s", device["name"])
+                    sender._send_radio(
+                        bytes([0xD2, 0x03]) + sid + b"\x00", dest_id=eid
+                    )
+                except Exception as e:
+                    logging.error("[COVER] Query failed for %s: %s", device["name"], e)
+                time.sleep(1.0)
+
+    def _republish_states():
+        # Called by MqttClient while seeding: only topics without a live
+        # value are published from state.json (see MqttClient.publish_state).
+        for device_list in cfg["devices_by_id"].values():
+            for device in device_list:
+                name  = device["name"]
+                dtype = device["type"]
+                if dtype in ("switch_passthrough",):
+                    continue
+                state = state_store_ref.get(name)
+                if state:
+                    try:
+                        parsed = json.loads(state)
+                        mqtt.publish_state(name, parsed)
+                    except (ValueError, TypeError):
+                        mqtt.publish_state(name, state)
+        threading.Thread(target=_query_covers, daemon=True).start()
+
+    mqtt._on_reconnect_cb = _republish_states
+
+    # The first on_connect fired before the callback and discovery existed,
+    # so do one explicit pass now (startup).
+    mqtt._republish_everything("bridge startup")
+
     logging.info("EnOcean bridge started")
 
     receiver.join()
 
 
 if __name__ == "__main__":
-    main()
+    main() 

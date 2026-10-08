@@ -23,7 +23,6 @@ class EnOceanReceiver(threading.Thread):
         self.state_store  = StateStore()
         self.secure_store = secure_store
         self._press_times = {}   # enocean_id → press start time
-        self._secure_rx_synced = set()   # enocean_ids mit synchronisiertem RX-RLC (Replay-Schutz aktiv)
 
     # --------------------------------------------------
     # Thread loop
@@ -272,9 +271,22 @@ class EnOceanReceiver(threading.Thread):
         logging.info("[PASSTHROUGH] %s → %s brightness=%d%%", dimmer_name, new_state, new_brightness)
 
     def _on_cover_status(self, pkt, device):
-        """D2-05-00 position report from cover actuator."""
+        """D2-05-00 position report from cover actuator.
+
+        Position is persisted in state.json so it can be re-published after
+        HA restarts / broker reconnects. 127 = "position unknown" (e.g. not
+        calibrated) and is not a valid position -> ignored.
+        """
         pos = pkt.data[1]
-        self.mqtt.publish_state(device["name"], {"position": pos})
+        if pos > 100:
+            logging.warning("Cover %s reported invalid position %d (raw=%s) — ignored",
+                            device["name"], pos,
+                            " ".join(f"{b:02X}" for b in pkt.data))
+            return
+
+        payload = {"position": pos}
+        self.state_store.set(device["name"], json.dumps(payload))
+        self.mqtt.publish_state(device["name"], payload)
         logging.info("Cover %s position=%d", device["name"], pos)
 
     def _on_secure_sensor(self, pkt, device):
@@ -283,39 +295,19 @@ class EnOceanReceiver(threading.Thread):
         if not sec.get("enabled") or not sec.get("key"):
             return
 
-        enocean_id = device["enocean_id"].upper()
-        ctx = self.secure_store.get(enocean_id) if self.secure_store else None
-
-        # RLC-Quelle: persistierter SecureContext vor config-Dict (Fossil)
-        stored_rlc = ctx.rlc_counter if ctx else sec.get("rlc_counter", 0)
-
-        # Replay-Schutz erst nach initialem Sync aktivieren:
-        # Das erste gueltige Telegramm nach Neustart uebernimmt den Frame-RLC
-        # als neue Baseline (Sensor kann waehrend Downtime beliebig weit
-        # vorgelaufen sein). Danach gilt das 128er-Vorwaertsfenster.
-        synced = enocean_id in self._secure_rx_synced
-
         payload = bytes(pkt.data[1:-5])
         inner_data, new_rlc, err = decode_secure_4bs(
             rorg_s       = 0x31,
             payload      = payload,
             key          = bytes.fromhex(sec["key"]),
-            rlc_counter  = stored_rlc,
+            rlc_counter  = sec.get("rlc_counter", 0),
             rlc_in_frame = sec.get("rlc_in_frame", True),
-            replay_window = 128 if synced else None,
         )
         if err:
             logging.warning("[SECURE-RX] %s: %s", device["name"], err)
             return
 
-        self._secure_rx_synced.add(enocean_id)
-
-        # RLC wrap-sicher fortschreiben und in den SecureStore persistieren
-        next_rlc = (new_rlc + 1) & 0xFFFF
-        sec["rlc_counter"] = next_rlc   # config-Dict konsistent halten
-        if ctx:
-            ctx.rlc_counter = next_rlc  # Property-Setter maskiert zusaetzlich
-            ctx.mark_dirty()
+        sec["rlc_counter"] = new_rlc + 1
         if self.secure_store:
             self.secure_store.save()
 
@@ -393,7 +385,7 @@ class EnOceanReceiver(threading.Thread):
 
             # Schedule with 300ms delay
             timer = threading.Timer(
-                0.3,
+                0.6,  # 600ms — HA sends multiple values when slider moves
                 self.sender.send_switch_command,
                 args=(device, command),
                 kwargs={"state_store": self.state_store},
